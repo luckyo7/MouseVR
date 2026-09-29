@@ -3,3 +3,12 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+
+# macOS
+.DS_Store
+
+# KiCad: local history repos, lock files, backups and stray export settings
+.history/
+*.lck
+*-backups/
+*-unsaved-export-*.kicad_prl
