@@ -28,15 +28,14 @@
 
 // Fix IDF problems with ESP32C3
 #if CONFIG_IDF_TARGET_ESP32C3
-  // Fix ESP32C3 IDF bug for missing definition (VSPI/FSPI only tested at the moment)
-  #ifndef REG_SPI_BASE
-    #define REG_SPI_BASE(i) DR_REG_SPI2_BASE
-  #endif
+  // IDF defines REG_SPI_BASE(i) returning 0 for i!=2, but SPI_PORT=SPI2_HOST=1.
+  // Force override so REG_SPI_BASE always returns the correct SPI2 base address.
+  #undef REG_SPI_BASE
+  #define REG_SPI_BASE(i) DR_REG_SPI2_BASE
 
   // Fix ESP32C3 IDF bug for name change
-  #ifndef SPI_MOSI_DLEN_REG
-    #define SPI_MOSI_DLEN_REG(x) SPI_MS_DLEN_REG(x)
-  #endif
+  #undef SPI_MOSI_DLEN_REG
+  #define SPI_MOSI_DLEN_REG(x) SPI_MS_DLEN_REG(x)
 #endif
 
 // SUPPORT_TRANSACTIONS is mandatory for ESP32 so the hal mutex is toggled

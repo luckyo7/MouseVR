@@ -532,7 +532,7 @@ TFT_eSPI::TFT_eSPI(int16_t w, int16_t h)
 ***************************************************************************************/
 void TFT_eSPI::initBus(void) {
 
-#ifdef TFT_CS
+#if defined (TFT_CS) && (TFT_CS >= 0)
   pinMode(TFT_CS, OUTPUT);
   digitalWrite(TFT_CS, HIGH); // Chip select high (inactive)
 #endif
@@ -647,7 +647,7 @@ void TFT_eSPI::init(uint8_t tc)
     INIT_TFT_DATA_BUS;
 
 
-#if defined (TFT_CS) && !defined(RP2040_PIO_INTERFACE)
+#if defined (TFT_CS) && (TFT_CS >= 0) && !defined(RP2040_PIO_INTERFACE)
   // Set to output once again in case MISO is used for CS
   pinMode(TFT_CS, OUTPUT);
   digitalWrite(TFT_CS, HIGH); // Chip select high (inactive)
