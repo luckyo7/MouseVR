@@ -2,16 +2,17 @@
 #include <SPI.h>
 #include <TFT_eSPI.h>
 #include <math.h>
+#include <esp_attr.h>
+#include <esp_system.h>
 
 // ESP32-C3 SuperMini -> MouseVR driver board. SPI, DC, RST and BL pins come
 // from the build flags in platformio.ini. Both panels hang off the same bus
 // and differ only in chip select: J2 = CS1 = right, J3 = CS2 = left. TFT_CS is
 // -1 so TFT_eSPI never drives CS; selectPanel() below does it instead.
 //
-// Test image: a checkerboard centred on the screen. The right panel shows it
-// as-is. The left panel shows it flipped horizontally (the panel is mounted
-// mirrored) and run through a spherical warp, so the two can be compared side
-// by side to judge what lens correction is needed. After a still black and
+// Test image: a checkerboard centred on the screen and run through a
+// spherical warp on both panels. The left panel shows it flipped horizontally
+// (the panel is mounted mirrored). After a still black and
 // white first frame, loop() scrolls the board diagonally and cycles its two
 // squares through complementary hues, so bus errors show up as tearing,
 // shifted rows or off colours.
@@ -60,6 +61,15 @@ void selectPanel(Panel p) {
 #define BL_HIZ_TEST 0
 // -----------------------------------------------------------------------
 
+// --- BL_EARLY_TEST -----------------------------------------------------
+// Diagnostic: light the backlight at full before the bus is touched instead
+// of fading it in after the first frame. A dark backlight then means the
+// ESP32 never got as far as setup(), rather than that it stopped (or reset)
+// part way through drawing, and whatever the panels receive is visible as
+// it arrives. Set to 0 to restore the fade-in.
+#define BL_EARLY_TEST 0
+// -----------------------------------------------------------------------
+
 // TFT_BL drives Q1's base through the 1K/10K/10K network, so PWM dims it.
 void setBacklight(uint8_t level) {
 #if BL_HIZ_TEST
@@ -93,9 +103,10 @@ void sphereWarp(float &u, float &v) {
   v *= scale;
 }
 
-// Left panel's pattern coordinates (mirrored + warped) for every pixel, in
-// 1/FIX pixels from the screen centre. Built once (100 KB) so animating never
-// repeats the asinf per pixel.
+// Warped pattern coordinates for every pixel, in 1/FIX pixels from the screen
+// centre. Built once (100 KB) so animating never repeats the asinf per pixel.
+// The warp is radially symmetric, so the mirrored left panel reuses it by
+// reading each row right to left.
 int16_t *warpU = nullptr;
 int16_t *warpV = nullptr;
 
@@ -106,7 +117,7 @@ bool buildWarpMap() {
   if (!warpU || !warpV) return false;
   for (int y = 0; y < TFT_HEIGHT; y++) {
     for (int x = 0; x < TFT_WIDTH; x++) {
-      float su = -(x + 0.5f - TFT_WIDTH / 2.0f);
+      float su = x + 0.5f - TFT_WIDTH / 2.0f;
       float sv = y + 0.5f - TFT_HEIGHT / 2.0f;
       sphereWarp(su, sv);
       warpU[y * TFT_WIDTH + x] = (int16_t)lroundf(su * FIX);
@@ -138,20 +149,15 @@ uint16_t hue565(uint16_t h) {
 // a corner where four squares meet.
 void drawFrame(Panel p, int32_t ox, int32_t oy, uint16_t a, uint16_t b) {
   static uint16_t block[TFT_WIDTH * ROWS];
-  const bool warped = (p == LEFT);
+  const bool mirror = (p == LEFT);
   selectPanel(p);
   for (int y0 = 0; y0 < TFT_HEIGHT; y0 += ROWS) {
     uint16_t *px = block;
     for (int y = y0; y < y0 + ROWS; y++) {
       for (int x = 0; x < TFT_WIDTH; x++) {
-        int32_t su, sv;
-        if (warped) {
-          su = warpU[y * TFT_WIDTH + x];
-          sv = warpV[y * TFT_WIDTH + x];
-        } else {
-          su = (2 * x + 1 - TFT_WIDTH) * FIX / 2;
-          sv = (2 * y + 1 - TFT_HEIGHT) * FIX / 2;
-        }
+        int     i  = y * TFT_WIDTH + (mirror ? TFT_WIDTH - 1 - x : x);
+        int32_t su = warpU[i];
+        int32_t sv = warpV[i];
         int32_t cu = (su - ox + BIAS) / CELL_FIX;
         int32_t cv = (sv - oy + BIAS) / CELL_FIX;
         *px++ = ((cu + cv) & 1) ? b : a;
@@ -160,6 +166,28 @@ void drawFrame(Panel p, int32_t ox, int32_t oy, uint16_t a, uint16_t b) {
     tft.pushImage(0, y0, TFT_WIDTH, ROWS, block);
   }
   selectPanel(NONE);
+}
+
+// Counts boots since the last power-on. RTC_NOINIT memory survives brownout,
+// watchdog and panic resets, so a climbing count shows a reset loop even if
+// the USB serial link misses the earlier boots.
+RTC_NOINIT_ATTR uint32_t bootCount;
+RTC_NOINIT_ATTR uint32_t bootMagic;
+
+const char *resetReasonName(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_POWERON:   return "power-on";
+    case ESP_RST_EXT:       return "external pin";
+    case ESP_RST_SW:        return "software";
+    case ESP_RST_PANIC:     return "PANIC (crash)";
+    case ESP_RST_INT_WDT:   return "INTERRUPT WATCHDOG";
+    case ESP_RST_TASK_WDT:  return "TASK WATCHDOG";
+    case ESP_RST_WDT:       return "WATCHDOG";
+    case ESP_RST_DEEPSLEEP: return "deep sleep wake";
+    case ESP_RST_BROWNOUT:  return "BROWNOUT";
+    case ESP_RST_SDIO:      return "SDIO";
+    default:                return "unknown";
+  }
 }
 
 // --- PIN_WALK_TEST -----------------------------------------------------
@@ -214,6 +242,9 @@ void setup() {
   // power-on garbage in display RAM is never lit.
 #if BL_HIZ_TEST
   pinMode(TFT_BL, INPUT);      // hi-Z: R8 alone should switch Q1 on
+#elif BL_EARLY_TEST
+  pinMode(TFT_BL, OUTPUT);
+  setBacklight(255);
 #else
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, LOW);
@@ -224,7 +255,16 @@ void setup() {
 
   Serial.begin(115200);
   delay(500);
+  esp_reset_reason_t reason = esp_reset_reason();
+  if (reason == ESP_RST_POWERON || bootMagic != 0xB007C0DE) {
+    bootMagic = 0xB007C0DE;
+    bootCount = 0;
+  }
+  bootCount++;
   Serial.println("[boot] ESP32-C3 SuperMini, dual panel");
+  Serial.printf("[boot] reset reason: %s, boot #%lu since power-on, SPI %lu Hz\n",
+                resetReasonName(reason), (unsigned long)bootCount,
+                (unsigned long)SPI_FREQUENCY);
 
   tft.init();
   tft.setRotation(0);
@@ -238,13 +278,17 @@ void setup() {
   }
   uint32_t t1 = millis();
   tft.setSwapBytes(true);
+  Serial.println("[boot] drawing first frame");
+  Serial.flush();
   drawFrame(RIGHT, 0, 0, TFT_WHITE, TFT_BLACK);
   drawFrame(LEFT, 0, 0, TFT_WHITE, TFT_BLACK);
   uint32_t t2 = millis();
   Serial.printf("[boot] warp map %lu ms, first frame (both panels) %lu ms\n",
                 (unsigned long)(t1 - t0), (unsigned long)(t2 - t1));
 
+#if !BL_EARLY_TEST
   fadeBacklight(0, 255, 300);
+#endif
   delay(1000);                 // hold the still frame before animating
   Serial.println("[boot] ready, animating");
 }
